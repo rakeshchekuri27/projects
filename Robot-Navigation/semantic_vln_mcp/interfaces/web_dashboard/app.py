@@ -1,0 +1,627 @@
+"""
+Web Dashboard for SemanticVLN-MCP
+==================================
+Part of SemanticVLN-MCP Framework
+
+INNOVATIVE ADDITION: Real-time monitoring and control
+
+Features:
+- Live camera feed display
+- Semantic map visualization
+- Robot status dashboard
+- Natural language command input
+- Real-time WebSocket updates
+
+Author: SemanticVLN-MCP Team
+"""
+
+import os
+import sys
+import json
+import base64
+import asyncio
+from threading import Thread
+
+from flask import Flask, render_template, request, jsonify
+from flask_socketio import SocketIO, emit
+
+# Add project root
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+
+
+def create_app(orchestrator=None):
+    """Create Flask application with orchestrator."""
+    
+    app = Flask(__name__)
+    app.config['SECRET_KEY'] = 'semantic-vln-mcp-secret'
+    socketio = SocketIO(app, cors_allowed_origins="*")
+    
+    # Store orchestrator reference
+    app.orchestrator = orchestrator
+    
+    @app.route('/')
+    def index():
+        """Main dashboard page."""
+        return render_template('index.html')
+    
+    @app.route('/api/status')
+    def get_status():
+        """Get current robot status."""
+        if app.orchestrator is None:
+            return jsonify({"error": "Orchestrator not initialized"})
+        
+        status = app.orchestrator.get_status()
+        return jsonify(status)
+    
+    @app.route('/api/command', methods=['POST'])
+    def send_command():
+        """Send navigation command."""
+        if app.orchestrator is None:
+            return jsonify({"error": "Orchestrator not initialized"})
+        
+        data = request.json
+        command = data.get('command', '')
+        
+        if not command:
+            return jsonify({"error": "No command provided"})
+        
+        # Run async command
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(app.orchestrator.process_instruction(command))
+            status = app.orchestrator.get_status()
+            return jsonify({"success": True, "status": status})
+        except Exception as e:
+            return jsonify({"error": str(e)})
+        finally:
+            loop.close()
+    
+    @app.route('/api/stop', methods=['POST'])
+    def stop_robot():
+        """Stop robot movement."""
+        if app.orchestrator is None:
+            return jsonify({"error": "Orchestrator not initialized"})
+        
+        from semantic_vln_mcp.mcp.orchestrator import RobotState
+        app.orchestrator.context.state = RobotState.STOPPED
+        return jsonify({"success": True})
+    
+    @app.route('/api/detections')
+    def get_detections():
+        """Get current object detections."""
+        if app.orchestrator is None:
+            return jsonify([])
+        
+        return jsonify(app.orchestrator.context.detections)
+    
+    @app.route('/api/beliefs')
+    def get_beliefs():
+        """Get TSG object beliefs."""
+        if app.orchestrator is None:
+            return jsonify([])
+        
+        beliefs = app.orchestrator.tsg.get_all_beliefs()
+        return jsonify(beliefs)
+    
+    @socketio.on('connect')
+    def handle_connect():
+        """Handle WebSocket connection."""
+        print('Client connected')
+        emit('connected', {'status': 'ok'})
+    
+    @socketio.on('request_update')
+    def handle_update_request():
+        """Send status update to client."""
+        if app.orchestrator is not None:
+            status = app.orchestrator.get_status()
+            emit('status_update', status)
+    
+    return app
+
+
+# Create templates directory and HTML file
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'templates')
+os.makedirs(TEMPLATE_DIR, exist_ok=True)
+
+INDEX_HTML = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SemanticVLN-MCP Dashboard</title>
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #14141f;
+            --bg-card: #1a1a2e;
+            --accent-blue: #4361ee;
+            --accent-purple: #7b2cbf;
+            --accent-cyan: #4cc9f0;
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0b0;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+        
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr 300px;
+            grid-template-rows: auto 1fr auto;
+            gap: 20px;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .header {
+            grid-column: 1 / -1;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            padding: 20px 30px;
+            border-radius: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+        
+        .header .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .card h2 {
+            font-size: 1rem;
+            color: var(--text-secondary);
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .camera-feed {
+            grid-row: span 2;
+        }
+        
+        .camera-placeholder {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            height: 400px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        
+        .semantic-map {
+            grid-row: span 2;
+        }
+        
+        .map-canvas {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            height: 400px;
+            position: relative;
+        }
+        
+        .robot-marker {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: var(--accent-cyan);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 20px var(--accent-cyan);
+        }
+        
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .status-item:last-child {
+            border-bottom: none;
+        }
+        
+        .status-label {
+            color: var(--text-secondary);
+        }
+        
+        .status-value {
+            font-weight: 600;
+        }
+        
+        .status-value.navigating {
+            color: var(--accent-cyan);
+        }
+        
+        .status-value.idle {
+            color: var(--text-secondary);
+        }
+        
+        .status-value.stopped {
+            color: var(--warning);
+        }
+        
+        .command-panel {
+            grid-column: 1 / -1;
+        }
+        
+        .command-input-wrapper {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .command-input {
+            flex: 1;
+            background: var(--bg-secondary);
+            border: 2px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 15px 20px;
+            color: var(--text-primary);
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+        
+        .command-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        
+        .command-input::placeholder {
+            color: var(--text-secondary);
+        }
+        
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            box-shadow: 0 10px 30px rgba(67, 97, 238, 0.3);
+        }
+        
+        .btn-danger {
+            background: var(--error);
+            color: white;
+        }
+        
+        .detections-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .detection-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        
+        .detection-name {
+            font-weight: 500;
+        }
+        
+        .detection-confidence {
+            color: var(--success);
+            font-size: 0.9rem;
+        }
+        
+        .quick-commands {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 15px;
+        }
+        
+        .quick-command {
+            padding: 8px 16px;
+            background: var(--bg-secondary);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.85rem;
+        }
+        
+        .quick-command:hover {
+            background: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <header class="header">
+            <h1>🤖 SemanticVLN-MCP Dashboard</h1>
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span id="connection-status">Connected</span>
+            </div>
+        </header>
+        
+        <div class="card camera-feed">
+            <h2>📷 Camera Feed</h2>
+            <div class="camera-placeholder" id="camera-view">
+                Camera feed will appear here when robot is active
+            </div>
+        </div>
+        
+        <div class="card semantic-map">
+            <h2>🗺️ Semantic Map</h2>
+            <div class="map-canvas" id="map-view">
+                <div class="robot-marker" id="robot-marker" style="left: 50%; top: 50%;"></div>
+            </div>
+        </div>
+        
+        <div class="sidebar">
+            <div class="card">
+                <h2>📊 Robot Status</h2>
+                <div class="status-item">
+                    <span class="status-label">State</span>
+                    <span class="status-value" id="robot-state">idle</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Position</span>
+                    <span class="status-value" id="robot-position">(0.00, 0.00)</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Heading</span>
+                    <span class="status-value" id="robot-heading">0.00°</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Velocity</span>
+                    <span class="status-value" id="robot-velocity">0.00 m/s</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Waypoints</span>
+                    <span class="status-value" id="waypoint-count">0</span>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>👁️ Detections</h2>
+                <div class="detections-list" id="detections-list">
+                    <div class="detection-item">
+                        <span class="detection-name">No detections</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>🧠 TSG Beliefs</h2>
+                <div class="detections-list" id="beliefs-list">
+                    <div class="detection-item">
+                        <span class="detection-name">No beliefs</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card command-panel">
+            <h2>💬 Navigation Command</h2>
+            <div class="command-input-wrapper">
+                <input type="text" class="command-input" id="command-input" 
+                       placeholder="Enter command (e.g., 'Navigate to the kitchen and find the coffee cup')">
+                <button class="btn btn-primary" id="send-btn" onclick="sendCommand()">Send</button>
+                <button class="btn btn-danger" onclick="stopRobot()">Stop</button>
+            </div>
+            <div class="quick-commands">
+                <span class="quick-command" onclick="quickCommand('Navigate to the kitchen')">Go to kitchen</span>
+                <span class="quick-command" onclick="quickCommand('Find the person')">Find person</span>
+                <span class="quick-command" onclick="quickCommand('Go to the living room')">Living room</span>
+                <span class="quick-command" onclick="quickCommand('Find the coffee cup')">Find coffee</span>
+                <span class="quick-command" onclick="quickCommand('Follow that person')">Follow person</span>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        // Initialize Socket.IO
+        const socket = io();
+        
+        socket.on('connect', () => {
+            document.getElementById('connection-status').textContent = 'Connected';
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connection-status').textContent = 'Disconnected';
+        });
+        
+        socket.on('status_update', (data) => {
+            updateStatus(data);
+        });
+        
+        // Update status periodically
+        setInterval(() => {
+            fetch('/api/status')
+                .then(r => r.json())
+                .then(updateStatus)
+                .catch(console.error);
+        }, 500);
+        
+        function updateStatus(data) {
+            const stateEl = document.getElementById('robot-state');
+            stateEl.textContent = data.state || 'unknown';
+            stateEl.className = 'status-value ' + (data.state || '');
+            
+            if (data.robot_pose) {
+                document.getElementById('robot-position').textContent = 
+                    `(${data.robot_pose[0].toFixed(2)}, ${data.robot_pose[1].toFixed(2)})`;
+                document.getElementById('robot-heading').textContent = 
+                    `${(data.robot_pose[2] * 180 / Math.PI).toFixed(1)}°`;
+                
+                // Update robot marker on map
+                const marker = document.getElementById('robot-marker');
+                marker.style.left = `${50 + data.robot_pose[0] * 5}%`;
+                marker.style.top = `${50 - data.robot_pose[1] * 5}%`;
+            }
+            
+            if (data.velocity) {
+                document.getElementById('robot-velocity').textContent = 
+                    `${data.velocity.linear.toFixed(2)} m/s`;
+            }
+            
+            document.getElementById('waypoint-count').textContent = 
+                `${data.current_waypoint || 0}/${data.path_waypoints || 0}`;
+        }
+        
+        // Fetch detections
+        setInterval(() => {
+            fetch('/api/detections')
+                .then(r => r.json())
+                .then(data => {
+                    const list = document.getElementById('detections-list');
+                    if (data.length === 0) {
+                        list.innerHTML = '<div class="detection-item"><span class="detection-name">No detections</span></div>';
+                    } else {
+                        list.innerHTML = data.map(d => `
+                            <div class="detection-item">
+                                <span class="detection-name">${d.class_name}</span>
+                                <span class="detection-confidence">${(d.confidence * 100).toFixed(0)}%</span>
+                            </div>
+                        `).join('');
+                    }
+                })
+                .catch(console.error);
+        }, 1000);
+        
+        // Fetch beliefs
+        setInterval(() => {
+            fetch('/api/beliefs')
+                .then(r => r.json())
+                .then(data => {
+                    const list = document.getElementById('beliefs-list');
+                    if (data.length === 0) {
+                        list.innerHTML = '<div class="detection-item"><span class="detection-name">No beliefs</span></div>';
+                    } else {
+                        list.innerHTML = data.map(b => `
+                            <div class="detection-item">
+                                <span class="detection-name">${b.class_name} ${b.is_visible ? '👁️' : '🔮'}</span>
+                                <span class="detection-confidence">${(b.confidence * 100).toFixed(0)}%</span>
+                            </div>
+                        `).join('');
+                    }
+                })
+                .catch(console.error);
+        }, 1000);
+        
+        function sendCommand() {
+            const input = document.getElementById('command-input');
+            const command = input.value.trim();
+            if (!command) return;
+            
+            fetch('/api/command', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({command})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    input.value = '';
+                }
+            })
+            .catch(console.error);
+        }
+        
+        function quickCommand(cmd) {
+            document.getElementById('command-input').value = cmd;
+            sendCommand();
+        }
+        
+        function stopRobot() {
+            fetch('/api/stop', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => console.log('Stopped'))
+                .catch(console.error);
+        }
+        
+        // Enter key to send
+        document.getElementById('command-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendCommand();
+        });
+    </script>
+</body>
+</html>
+'''
+
+# Write the template
+with open(os.path.join(TEMPLATE_DIR, 'index.html'), 'w', encoding='utf-8') as f:
+    f.write(INDEX_HTML)
+
+
+if __name__ == '__main__':
+    # Test run without orchestrator
+    app = create_app(None)
+    print("Starting web dashboard at http://localhost:5000")
+    app.run(host='0.0.0.0', port=5000, debug=True)
